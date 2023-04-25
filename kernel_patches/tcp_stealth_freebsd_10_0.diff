@@ -1,0 +1,597 @@
+diff -Nurp sys/conf/NOTES sys-knock/conf/NOTES
+--- sys/conf/NOTES	2014-11-17 18:05:26.000000000 +0100
++++ sys-knock/conf/NOTES	2014-11-17 18:06:30.000000000 +0100
+@@ -990,6 +990,9 @@ options 	ACCEPT_FILTER_HTTP
+ # or 'device cryptodev'.
+ options 	TCP_SIGNATURE		#include support for RFC 2385
+ 
++# TCP_STEALTH support for hidden TCP sockets
++options 	TCP_TCPSTEALTH
++
+ # DUMMYNET enables the "dummynet" bandwidth limiter.  You need IPFIREWALL
+ # as well.  See dummynet(4) and ipfw(8) for more info.  When you run
+ # DUMMYNET it is advisable to also have at least "options HZ=1000" to achieve
+diff -Nurp sys/conf/options sys-knock/conf/options
+--- sys/conf/options	2014-11-17 18:05:26.000000000 +0100
++++ sys-knock/conf/options	2014-11-17 18:06:30.000000000 +0100
+@@ -435,6 +435,7 @@ SLIP_IFF_OPTS		opt_slip.h
+ TCPDEBUG
+ TCP_OFFLOAD		opt_inet.h # Enable code to dispatch TCP offloading
+ TCP_SIGNATURE		opt_inet.h
++TCP_TCPSTEALTH		opt_inet.h
+ VLAN_ARRAY		opt_vlan.h
+ XBONEHACK
+ FLOWTABLE		opt_route.h
+diff -Nurp sys/kern/md5c.c sys-knock/kern/md5c.c
+--- sys/kern/md5c.c	2014-11-17 18:05:33.000000000 +0100
++++ sys-knock/kern/md5c.c	2014-11-17 18:06:30.000000000 +0100
+@@ -44,8 +44,6 @@ __FBSDID("$FreeBSD: release/10.0.0/sys/k
+ #include <sys/endian.h>
+ #include <sys/md5.h>
+ 
+-static void MD5Transform(u_int32_t [4], const unsigned char [64]);
+-
+ #if (BYTE_ORDER == LITTLE_ENDIAN)
+ #define Encode memcpy
+ #define Decode memcpy
+@@ -233,7 +231,7 @@ MD5Final (digest, context)
+ 
+ /* MD5 basic transformation. Transforms state based on block. */
+ 
+-static void
++void
+ MD5Transform (state, block)
+ 	u_int32_t state[4];
+ 	const unsigned char block[64];
+diff -Nurp sys/netinet/tcp.h sys-knock/netinet/tcp.h
+--- sys/netinet/tcp.h	2014-11-17 18:05:33.000000000 +0100
++++ sys-knock/netinet/tcp.h	2014-11-17 18:06:30.000000000 +0100
+@@ -153,18 +153,25 @@ struct tcphdr {
+  * values and are not masked together.  Some values appear to be
+  * bitmasks for historical reasons.
+  */
+-#define	TCP_NODELAY	1	/* don't delay send to coalesce packets */
++#define	TCP_NODELAY		1	/* don't delay send to coalesce packets */
+ #if __BSD_VISIBLE
+-#define	TCP_MAXSEG	2	/* set maximum segment size */
+-#define TCP_NOPUSH	4	/* don't push last block of write */
+-#define TCP_NOOPT	8	/* don't use TCP options */
+-#define TCP_MD5SIG	16	/* use MD5 digests (RFC2385) */
+-#define	TCP_INFO	32	/* retrieve tcp_info structure */
+-#define	TCP_CONGESTION	64	/* get/set congestion control algorithm */
+-#define	TCP_KEEPINIT	128	/* N, time to establish connection */
+-#define	TCP_KEEPIDLE	256	/* L,N,X start keeplives after this period */
+-#define	TCP_KEEPINTVL	512	/* L,N interval between keepalives */
+-#define	TCP_KEEPCNT	1024	/* L,N number of keepalives before close */
++#define	TCP_MAXSEG		2	/* set maximum segment size */
++#define TCP_NOPUSH		4	/* don't push last block of write */
++#define TCP_NOOPT		8	/* don't use TCP options */
++#define TCP_MD5SIG		16	/* use MD5 digests (RFC2385) */
++#define TCP_INFO		32	/* retrieve tcp_info structure */
++#define TCP_CONGESTION		64	/* get/set congestion control algorithm */
++#define TCP_KEEPINIT		128	/* N, time to establish connection */
++#define TCP_KEEPIDLE		256	/* L,N,X start keeplives after this period */
++#define TCP_KEEPINTVL		512	/* L,N interval between keepalives */
++#define TCP_KEEPCNT		1024	/* L,N number of keepalives before close */
++#ifdef TCP_TCPSTEALTH
++#define TCP_STEALTH		2048	/* TCP Stealth authentication */
++#define TCP_STEALTH_INTEGRITY		4096	/* TCP Stealth integrity protection */
++#define TCP_STEALTH_INTEGRITY_LEN	8192	/* TCP Stealth integrity protection len */
++#define TCP_STEALTH_SECRET_SIZE	64
++#endif /* TCP_TCPSTEALTH */
++
+ 
+ /* Start of reserved space for third-party user-settable options. */
+ #define	TCP_VENDOR	SO_VENDOR
+diff -Nurp sys/netinet/tcp_input.c sys-knock/netinet/tcp_input.c
+--- sys/netinet/tcp_input.c	2014-11-17 18:05:33.000000000 +0100
++++ sys-knock/netinet/tcp_input.c	2014-11-20 18:52:01.000000000 +0100
+@@ -1154,6 +1154,7 @@ relocked:
+ 			}
+ #endif
+ 
++
+ 			/*
+ 			 * Process the segment and the data it
+ 			 * contains.  tcp_do_segment() consumes
+@@ -1164,6 +1165,20 @@ relocked:
+ 			INP_INFO_UNLOCK_ASSERT(&V_tcbinfo);
+ 			return;
+ 		}
++#ifdef TCP_TCPSTEALTH
++		if ((thflags & (TH_RST | TH_ACK | TH_SYN)) == TH_SYN &&
++		    tp->stealth.mode & TCP_STEALTH_MODE_AUTH) {
++			/*
++			 * Even though we DID receive a SYN, do not
++			 * indicate that to tcp_dooptions as it would
++			 * omit parsing the timetamp TCP Stealth is
++			 * interested in, otherwise
++			 */
++			tcp_dooptions(&to, optp, optlen, 0);
++			if (tcp_stealth_do_auth(tp, m, th, &to))
++				goto dropwithreset;
++		}
++#endif /* TCP_TCPSTEALTH */
+ 		/*
+ 		 * Segment flag validation for new connection attempts:
+ 		 *
+@@ -1393,6 +1408,18 @@ relocked:
+ 	}
+ #endif
+ 
++#ifdef TCP_TCPSTEALTH
++	if (tp->stealth.mode & TCP_STEALTH_MODE_AUTH &&
++	    tp->stealth.mode & TCP_STEALTH_MODE_INTEGRITY_LEN &&
++	    tcp_stealth_integrity_check(tp, th, tlen)) {
++		INP_INFO_WLOCK_ASSERT(&V_tcbinfo);
++		tcp_state_change(tp, TCPS_CLOSED);
++		TCPSTAT_INC(tcps_drops);
++		tp = tcp_close(tp);
++		goto dropwithreset;
++	}
++#endif /* TCP_TCPSTEALTH */
++
+ 	TCP_PROBE5(receive, NULL, tp, m->m_data, tp, th);
+ 
+ 	/*
+diff -Nurp sys/netinet/tcp_output.c sys-knock/netinet/tcp_output.c
+--- sys/netinet/tcp_output.c	2014-11-17 18:05:33.000000000 +0100
++++ sys-knock/netinet/tcp_output.c	2014-11-20 16:51:03.000000000 +0100
+@@ -714,7 +714,15 @@ send:
+ 		/* Timestamps. */
+ 		if ((tp->t_flags & TF_RCVD_TSTMP) ||
+ 		    ((flags & TH_SYN) && (tp->t_flags & TF_REQ_TSTMP))) {
+-			to.to_tsval = tcp_ts_getticks() + tp->ts_offset;
++#ifdef TCP_TCPSTEALTH
++			if (tp->stealth.mode & TCP_STEALTH_MODE_AUTH) {
++				to.to_tsval = tp->stealth.tsval;
++			} else
++#endif /* TCP_TCPSTEALTH */
++			{
++				to.to_tsval = tcp_ts_getticks() + tp->ts_offset;
++			}
++
+ 			to.to_tsecr = tp->ts_recent;
+ 			to.to_flags |= TOF_TS;
+ 			/* Set receive buffer autosizing timestamp. */
+diff -Nurp sys/netinet/tcp_subr.c sys-knock/netinet/tcp_subr.c
+--- sys/netinet/tcp_subr.c	2014-11-17 18:05:33.000000000 +0100
++++ sys-knock/netinet/tcp_subr.c	2014-11-20 18:51:13.000000000 +0100
+@@ -59,6 +59,9 @@ __FBSDID("$FreeBSD: release/10.0.0/sys/n
+ #include <sys/socketvar.h>
+ #include <sys/protosw.h>
+ #include <sys/random.h>
++#ifdef TCP_TCPSTEALTH
++#include <sys/endian.h>
++#endif /* TCP_TCPSTEALTH */
+ 
+ #include <vm/uma.h>
+ 
+@@ -1694,6 +1697,140 @@ tcp_new_isn(struct tcpcb *tp)
+ 	return (new_isn);
+ }
+ 
++#ifdef TCP_TCPSTEALTH
++#define be32_isn_to_be16_av(x) (((u_int16_t *)&x)[0])
++#define be32_isn_to_be16_ih(x) (((u_int16_t *)&x)[1])
++tcp_seq
++tcp_stealth_isn_gen(struct tcpcb *tp, u_int32_t *daddr, size_t daddr_len,
++		    u_int16_t dport)
++{
++	u_int32_t sec[TCP_STEALTH_SECRET_SIZE / sizeof(u_int32_t)];
++	u_int32_t tsval = 0;
++	int i;
++
++	u_int32_t iv[MD5_DIGEST_LENGTH / sizeof(u_int32_t)] = { 0 };
++	u_int32_t isn;
++
++	INP_WLOCK_ASSERT(tp->t_inpcb);
++	ISN_LOCK();
++
++	memcpy(iv, (u_int8_t *)daddr, daddr_len);
++
++	if ((tp->t_flags & TF_RCVD_TSTMP) ||
++	    (tp->t_flags & TF_REQ_TSTMP)) {
++		tsval = tp->stealth.tsval;
++	}
++
++	((u_int16_t *)iv)[2] ^= htobe16(tp->stealth.integrity_hash);
++	iv[2] ^= htobe32(tsval);
++	((u_int16_t *)iv)[6] ^= dport;
++
++	for (i = 0; i < MD5_DIGEST_LENGTH / sizeof(u_int32_t); i++)
++		iv[i] = le32toh(iv[i]);
++
++	for (i = 0; i < TCP_STEALTH_SECRET_SIZE / sizeof(u_int32_t); i++)
++		sec[i] = le32toh(((u_int32_t *)tp->stealth.secret)[i]);
++
++	MD5Transform(iv, (const u_int8_t *)sec);
++
++	isn = htobe32(iv[0]) ^ htobe32(iv[1]) ^ htobe32(iv[2]) ^ htobe32(iv[3]);
++
++	if (tp->stealth.mode & TCP_STEALTH_MODE_INTEGRITY)
++		be32_isn_to_be16_ih(isn) = htobe16(tp->stealth.integrity_hash);
++
++	ISN_UNLOCK();
++
++	return be32toh(isn);
++}
++
++tcp_seq
++tcp_stealth_isn(struct tcpcb *tp)
++{
++	if ((tp->t_flags & TF_RCVD_TSTMP) ||
++	    (tp->t_flags & TF_REQ_TSTMP)) {
++ 		tp->stealth.tsval = tcp_ts_getticks() + tp->ts_offset;
++	}
++#ifdef INET6
++	if ((tp->t_inpcb->inp_vflag & INP_IPV6) != 0) {
++		return tcp_stealth_isn_gen(tp, (u_int32_t *)&tp->t_inpcb->in6p_faddr,
++		       			   sizeof(struct in6_addr), tp->t_inpcb->inp_fport);
++	} else
++#endif
++	{
++		return tcp_stealth_isn_gen(tp, (u_int32_t *)&tp->t_inpcb->inp_faddr,
++		       			   sizeof(struct in_addr), tp->t_inpcb->inp_fport);
++	}
++}
++
++int
++tcp_stealth_do_auth(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
++		    struct tcpopt *to)
++{
++	u_int32_t isn = htobe32(th->th_seq);
++	u_int32_t hash;
++	struct ip *ip = mtod(m, struct ip *);
++#ifdef INET6
++	struct ip6_hdr *ip6 = mtod(m, struct ip6_hdr *);
++#endif
++
++	tp->stealth.saw_tsval = to->to_flags & TOF_TS;
++	tp->stealth.tsval = to->to_tsval;
++
++	if (tp->stealth.mode & TCP_STEALTH_MODE_INTEGRITY_LEN)
++		tp->stealth.integrity_hash =
++			be16toh(be32_isn_to_be16_ih(isn));
++	
++#ifdef INET6
++	if (ip->ip_v == 6) {
++		hash = tcp_stealth_isn_gen(tp, (u_int32_t *)&ip6->ip6_dst,
++					   sizeof(ip6->ip6_dst), th->th_dport);
++	} else 
++#endif
++	{
++		hash = tcp_stealth_isn_gen(tp, (u_int32_t *)&ip->ip_dst,
++					   sizeof(ip->ip_dst), th->th_dport);
++	}
++
++	hash = htobe32(hash);
++
++	if (tp->stealth.mode & TCP_STEALTH_MODE_AUTH &&
++	    tp->stealth.mode & TCP_STEALTH_MODE_INTEGRITY_LEN &&
++	    be32_isn_to_be16_av(isn) == be32_isn_to_be16_av(hash))
++		return 0;
++
++	if (tp->stealth.mode & TCP_STEALTH_MODE_AUTH &&
++	    !(tp->stealth.mode & TCP_STEALTH_MODE_INTEGRITY_LEN) &&
++	    isn == hash)
++		return 0;
++
++	return 1;
++}
++
++int
++tcp_stealth_integrity_check(struct tcpcb *tp, struct tcphdr *th, size_t tlen)
++{
++	u_int32_t seq = htobe32(th->th_seq - 1);
++	/* tcp_input already verified that th->doff does not point beyond
++	 * the end of the packet.
++	 */
++	u_int8_t *data = (u_int8_t *)th + th->th_off * 4;
++	size_t len = tlen - th->th_off * 4;
++	u_int16_t hash;
++
++	if (len < tp->stealth.integrity_len)
++		return 1;
++
++	tcp_stealth_integrity(&hash, tp->stealth.secret, data,
++			      tp->stealth.integrity_len);
++
++	if (be32_isn_to_be16_ih(seq) != htobe16(hash))
++		return 1;
++
++	tp->stealth.mode &= ~TCP_STEALTH_MODE_INTEGRITY_LEN;
++	return 0;
++}
++#endif /* TCP_TCPSTEALTH */
++
+ /*
+  * When a specific ICMP unreachable message is received and the
+  * connection state is SYN-SENT, drop the connection.  This behavior
+@@ -1896,6 +2033,37 @@ ipsec_hdrsiz_tcp(struct tcpcb *tp)
+ }
+ #endif /* IPSEC */
+ 
++#ifdef TCP_TCPSTEALTH
++/*
++ *  Compute the TCP Stealth integrity hash from secret and payload.
++ *
++ *  Parameters:
++ *  hash	calculated TCP Stealth integrity hash
++ *  secret	symmetric TCP Stealth secret used by client and server
++ *  payload	payload to hash
++ *  len		size of the payload
++ */
++void
++tcp_stealth_integrity(u_int16_t *hash, u_int8_t *secret, u_int8_t *payload, size_t len)
++{
++	MD5_CTX ctx;
++	u_int16_t h[MD5_DIGEST_LENGTH / sizeof(u_int16_t)];
++	int i;
++
++	MD5Init(&ctx);
++	MD5Update(&ctx, secret, TCP_STEALTH_SECRET_SIZE);
++	MD5Update(&ctx, payload, len);
++	MD5Final((u_int8_t *)h, &ctx);
++
++	*hash = be16toh(h[0]);
++	for (i = 1; i < MD5_DIGEST_LENGTH / sizeof(u_int16_t); i++)
++		*hash ^= be16toh(h[i]);
++
++	return;
++
++}
++#endif /* TCP_TCPSTEALTH */
++
+ #ifdef TCP_SIGNATURE
+ /*
+  * Callback function invoked by m_apply() to digest TCP segment data
+diff -Nurp sys/netinet/tcp_syncache.c sys-knock/netinet/tcp_syncache.c
+--- sys/netinet/tcp_syncache.c	2014-11-17 18:05:33.000000000 +0100
++++ sys-knock/netinet/tcp_syncache.c	2014-11-20 18:37:00.000000000 +0100
+@@ -847,6 +847,11 @@ syncache_socket(struct syncache *sc, str
+ 	tp->rcv_wnd = sc->sc_wnd;
+ 	tp->rcv_adv += tp->rcv_wnd;
+ 	tp->last_ack_sent = tp->rcv_nxt;
++#ifdef TCP_TCPSTEALTH
++	tp->stealth.mode = sototcpcb(lso)->stealth.mode;
++	memcpy(tp->stealth.secret, sototcpcb(lso)->stealth.secret, TCP_STEALTH_SECRET_SIZE);
++	tp->stealth.integrity_len = sototcpcb(lso)->stealth.integrity_len;
++#endif /* TCP_TCPSTEALTH */
+ 
+ 	tp->t_flags = sototcpcb(lso)->t_flags & (TF_NOPUSH|TF_NODELAY);
+ 	if (sc->sc_flags & SCF_NOOPT)
+diff -Nurp sys/netinet/tcp_usrreq.c sys-knock/netinet/tcp_usrreq.c
+--- sys/netinet/tcp_usrreq.c	2014-11-17 18:05:33.000000000 +0100
++++ sys-knock/netinet/tcp_usrreq.c	2014-11-20 18:54:55.000000000 +0100
+@@ -58,6 +58,9 @@ __FBSDID("$FreeBSD: release/10.0.0/sys/n
+ #include <sys/protosw.h>
+ #include <sys/proc.h>
+ #include <sys/jail.h>
++#ifdef TCP_TCPSTEALTH
++#include <sys/md5.h>
++#endif /* TCP_TCPSTEALTH */
+ 
+ #ifdef DDB
+ #include <ddb/ddb.h>
+@@ -118,6 +121,11 @@ static void	tcp_fill_info(struct tcpcb *
+ #define	TCPDEBUG2(req)
+ #endif
+ 
++#ifdef TCP_TCPSTEALTH
++static MALLOC_DEFINE(M_STEALTH_PAYLOAD, "tcp_stealth_payload",
++		     "user payload to be integrity protected");
++#endif /* TCP_TCPSTEALTH */
++
+ /*
+  * TCP attaches to socket via pru_attach(), reserving space,
+  * and an internet control block.
+@@ -1153,7 +1161,15 @@ tcp_connect(struct tcpcb *tp, struct soc
+ 	soisconnecting(so);
+ 	TCPSTAT_INC(tcps_connattempt);
+ 	tcp_state_change(tp, TCPS_SYN_SENT);
+-	tp->iss = tcp_new_isn(tp);
++
++#ifdef TCP_TCPSTEALTH
++	if (tp->stealth.mode & TCP_STEALTH_MODE_AUTH) {
++		tp->iss = tcp_stealth_isn(tp);
++	} else
++#endif /* TCP_TCPSTEALTH */
++	{
++		tp->iss = tcp_new_isn(tp);
++	}
+ 	tcp_sendseqinit(tp);
+ 
+ 	return 0;
+@@ -1311,6 +1327,10 @@ tcp_ctloutput(struct socket *so, struct 
+ 	struct	tcp_info ti;
+ 	char buf[TCP_CA_NAME_MAX];
+ 	struct cc_algo *algo;
++#ifdef TCP_TCPSTEALTH
++	u_int8_t secret[TCP_STEALTH_SECRET_SIZE];
++	u_int8_t *payload;
++#endif /* TCP_TCPSTEALTH */
+ 
+ 	error = 0;
+ 	inp = sotoinpcb(so);
+@@ -1358,6 +1378,92 @@ tcp_ctloutput(struct socket *so, struct 
+ 			goto unlock_and_done;
+ #endif /* TCP_SIGNATURE */
+ 
++#ifdef TCP_TCPSTEALTH
++		case TCP_STEALTH:
++			INP_WUNLOCK(inp);
++			if (sopt->sopt_valsize != TCP_STEALTH_SECRET_SIZE)
++				return (error);
++
++			error = sooptcopyin(sopt, secret, sizeof secret,
++			    sizeof secret);
++			if (error)
++				return (error);
++
++			INP_WLOCK_RECHECK(inp);
++			memcpy(tp->stealth.secret, secret, sizeof secret);
++			tp->stealth.mode = TCP_STEALTH_MODE_AUTH;
++			tp->stealth.tsval = 0;
++			tp->stealth.saw_tsval = false;
++
++			goto unlock_and_done;
++
++		case TCP_STEALTH_INTEGRITY:
++			tp = intotcpcb(inp);
++			if (!(tp->stealth.mode & TCP_STEALTH_MODE_AUTH)) {
++				error = -EOPNOTSUPP;
++				goto unlock_and_done;
++			}
++
++			if (sopt->sopt_valsize < 1 ||
++			    sopt->sopt_valsize > USHRT_MAX) {
++				error = -EINVAL;
++				goto unlock_and_done;
++			}
++
++			payload = (u_int8_t *)malloc(sopt->sopt_valsize,
++						     M_STEALTH_PAYLOAD,
++						     M_WAITOK);
++
++			if (!payload) {
++				error = -ENOMEM;
++				goto unlock_and_done;
++			}
++
++			INP_WUNLOCK(inp);
++			error = sooptcopyin(sopt, payload, sopt->sopt_valsize,
++					    sopt->sopt_valsize);
++
++			INP_WLOCK_RECHECK(inp);
++			if (error)
++				goto stealth_integrity_out;
++
++			tcp_stealth_integrity(&tp->stealth.integrity_hash,
++					      tp->stealth.secret, payload,
++					      sopt->sopt_valsize);
++
++			if (error)
++				goto stealth_integrity_out;
++
++			tp->stealth.mode |= TCP_STEALTH_MODE_INTEGRITY;
++
++stealth_integrity_out:
++			free(payload, M_STEALTH_PAYLOAD);
++			goto unlock_and_done;
++
++		case TCP_STEALTH_INTEGRITY_LEN:
++			tp = intotcpcb(inp);
++			if (!(tp->stealth.mode & TCP_STEALTH_MODE_AUTH)) {
++					error = -EOPNOTSUPP;
++					goto unlock_and_done;
++			}
++
++			INP_WUNLOCK(inp);
++			error = sooptcopyin(sopt, &optval, sizeof optval,
++			    sizeof optval);
++			if (error)
++				return (error);
++
++			INP_WLOCK_RECHECK(inp);
++			if (optval < 1 || optval > USHRT_MAX) {
++				error = -EINVAL;
++			} else {
++				tp->stealth.integrity_len = optval;
++				tp->stealth.mode |= TCP_STEALTH_MODE_INTEGRITY_LEN;
++			}
++
++			goto unlock_and_done;
++
++#endif /* TCP_TCPSTEALTH */
+ 		case TCP_NODELAY:
+ 		case TCP_NOOPT:
+ 			INP_WUNLOCK(inp);
+@@ -1552,7 +1658,6 @@ unlock_and_done:
+ 			error = sooptcopyout(sopt, &optval, sizeof optval);
+ 			break;
+ #endif
+-
+ 		case TCP_NODELAY:
+ 			optval = tp->t_flags & TF_NODELAY;
+ 			INP_WUNLOCK(inp);
+diff -Nurp sys/netinet/tcp_var.h sys-knock/netinet/tcp_var.h
+--- sys/netinet/tcp_var.h	2014-11-17 18:05:33.000000000 +0100
++++ sys-knock/netinet/tcp_var.h	2014-11-20 16:29:43.000000000 +0100
+@@ -37,6 +37,9 @@
+ 
+ #ifdef _KERNEL
+ #include <net/vnet.h>
++#ifdef TCP_TCPSTEALTH
++#include <sys/md5.h>
++#endif /* TCP_TCPSTEALTH */
+ 
+ /*
+  * Kernel variables for tcp.
+@@ -81,6 +84,20 @@ struct tcptemp {
+ 	struct	tcphdr tt_t;
+ };
+ 
++#ifdef TCP_TCPSTEALTH
++struct stealth {
++#define TCP_STEALTH_MODE_AUTH		(1 << 0)
++#define TCP_STEALTH_MODE_INTEGRITY	(1 << 1)
++#define TCP_STEALTH_MODE_INTEGRITY_LEN	(1 << 2)
++	int mode;
++	uint8_t		secret[TCP_STEALTH_SECRET_SIZE];
++	size_t		integrity_len;
++	uint16_t	integrity_hash;
++	uint32_t	tsval;
++	bool		saw_tsval;
++};
++#endif /* TCP_TCPSTEALTH */
++
+ #define tcp6cb		tcpcb  /* for KAME src sync over BSD*'s */
+ 
+ /* Neighbor Discovery, Neighbor Unreachability Detection Upper layer hint. */
+@@ -208,6 +225,10 @@ struct tcpcb {
+ 	u_int	t_keepintvl;		/* interval between keepalives */
+ 	u_int	t_keepcnt;		/* number of keepalives before close */
+ 
++#ifdef TCP_TCPSTEALTH
++	struct stealth stealth;
++#endif /* TCP_TCPSTEALTH */
++
+ 	u_int	t_tsomax;		/* tso burst length limit */
+ 
+ 	uint32_t t_ispare[8];		/* 5 UTO, 3 TBD */
+@@ -697,6 +718,12 @@ int	 tcp_twcheck(struct inpcb *, struct 
+ 	    struct mbuf *, int);
+ int	 tcp_twrespond(struct tcptw *, int);
+ void	 tcp_setpersist(struct tcpcb *);
++#ifdef TCP_TCPSTEALTH
++void	 tcp_stealth_integrity(u_int16_t *, u_int8_t *, u_int8_t *, size_t);
++int	 tcp_stealth_integrity_check(struct tcpcb *, struct tcphdr *, size_t);
++int      tcp_stealth_do_auth(struct tcpcb *, struct mbuf *, struct tcphdr *,
++			     struct tcpopt *);
++#endif /* TCP_TCPSTEALTH */
+ #ifdef TCP_SIGNATURE
+ int	 tcp_signature_compute(struct mbuf *, int, int, int, u_char *, u_int);
+ int	 tcp_signature_verify(struct mbuf *, int, int, int, struct tcpopt *,
+@@ -722,6 +749,11 @@ void	 tcp_hc_updatemtu(struct in_conninf
+ void	 tcp_hc_update(struct in_conninfo *, struct hc_metrics_lite *);
+ 
+ extern	struct pr_usrreqs tcp_usrreqs;
++
++#ifdef TCP_TCPSTEALTH
++tcp_seq tcp_stealth_isn(struct tcpcb *);
++tcp_seq tcp_stealth_isn_gen(struct tcpcb *, u_int32_t *, size_t, u_int16_t);
++#endif /* TCP_TCPSTEALTH */
+ tcp_seq tcp_new_isn(struct tcpcb *);
+ 
+ void	 tcp_sack_doack(struct tcpcb *, struct tcpopt *, tcp_seq);
+diff -Nurp sys/sys/md5.h sys-knock/sys/md5.h
+--- sys/sys/md5.h	2014-11-17 18:05:26.000000000 +0100
++++ sys-knock/sys/md5.h	2014-11-17 18:06:30.000000000 +0100
+@@ -49,5 +49,6 @@ char * MD5End(MD5_CTX *, char *);
+ char * MD5File(const char *, char *);
+ char * MD5FileChunk(const char *, char *, off_t, off_t);
+ char * MD5Data(const void *, unsigned int, char *);
++void   MD5Transform(u_int32_t [4], const unsigned char [64]);
+ __END_DECLS
+ #endif /* _SYS_MD5_H_ */

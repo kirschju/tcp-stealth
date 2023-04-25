@@ -1,0 +1,421 @@
+diff -Nurp openssh-6.7/readconf.c openssh-6.7-knock/readconf.c
+--- openssh-6.7/readconf.c	2014-07-15 17:54:14.000000000 +0200
++++ openssh-6.7-knock/readconf.c	2014-11-10 13:45:50.158522261 +0100
+@@ -143,6 +143,9 @@ typedef enum {
+ 	oCanonicalDomains, oCanonicalizeHostname, oCanonicalizeMaxDots,
+ 	oCanonicalizeFallbackLocal, oCanonicalizePermittedCNAMEs,
+ 	oStreamLocalBindMask, oStreamLocalBindUnlink,
++#ifdef TCP_STEALTH
++	oTCPStealthSecret,
++#endif
+ 	oIgnoredUnknownOption, oDeprecated, oUnsupported
+ } OpCodes;
+ 
+@@ -258,6 +261,9 @@ static struct {
+ 	{ "streamlocalbindmask", oStreamLocalBindMask },
+ 	{ "streamlocalbindunlink", oStreamLocalBindUnlink },
+ 	{ "ignoreunknown", oIgnoreUnknown },
++#ifdef TCP_STEALTH
++	{ "tcpstealthsecret", oTCPStealthSecret },
++#endif
+ 
+ 	{ NULL, oBadOption }
+ };
+@@ -1424,6 +1430,23 @@ parse_int:
+ 		intptr = &options->fwd_opts.streamlocal_bind_unlink;
+ 		goto parse_flag;
+ 
++#ifdef TCP_STEALTH
++	case oTCPStealthSecret:
++		charptr = &options->tcp_stealth_secret;
++
++		arg = strdelim(&s);
++		if (!arg || *arg == '\0')
++			fatal("%.200s line %d: Missing argument.",
++			    filename, linenum);
++
++		if (*activep && *charptr == NULL) {
++			*charptr = xmalloc(TCP_STEALTH_SECRET_SIZE + 1);
++			memset(*charptr, 0x00, TCP_STEALTH_SECRET_SIZE + 1);
++			strncpy(*charptr, arg, TCP_STEALTH_SECRET_SIZE);
++		}
++
++		break;
++#endif
+ 	case oDeprecated:
+ 		debug("%s line %d: Deprecated option \"%s\"",
+ 		    filename, linenum, keyword);
+@@ -1600,6 +1623,9 @@ initialize_options(Options * options)
+ 	options->canonicalize_max_dots = -1;
+ 	options->canonicalize_fallback_local = -1;
+ 	options->canonicalize_hostname = -1;
++#ifdef TCP_STEALTH
++	options->tcp_stealth_secret = NULL;
++#endif
+ }
+ 
+ /*
+diff -Nurp openssh-6.7/readconf.h openssh-6.7-knock/readconf.h
+--- openssh-6.7/readconf.h	2014-07-15 17:54:14.000000000 +0200
++++ openssh-6.7-knock/readconf.h	2014-11-10 13:45:50.162522227 +0100
+@@ -145,6 +145,9 @@ typedef struct {
+ 	struct allowed_cname permitted_cnames[MAX_CANON_DOMAINS];
+ 
+ 	char	*ignored_unknown; /* Pattern list of unknown tokens to ignore */
++#ifdef TCP_STEALTH
++	char	*tcp_stealth_secret;
++#endif
+ }       Options;
+ 
+ #define SSH_CANONICALISE_NO	0
+diff -Nurp openssh-6.7/servconf.c openssh-6.7-knock/servconf.c
+--- openssh-6.7/servconf.c	2014-07-15 17:54:14.000000000 +0200
++++ openssh-6.7-knock/servconf.c	2014-11-10 13:45:50.162522227 +0100
+@@ -148,6 +148,9 @@ initialize_server_options(ServerOptions
+ 	options->ip_qos_interactive = -1;
+ 	options->ip_qos_bulk = -1;
+ 	options->version_addendum = NULL;
++#ifdef TCP_STEALTH
++	options->tcp_stealth_secret = NULL;
++#endif
+ }
+ 
+ void
+@@ -333,6 +336,9 @@ typedef enum {
+ 	sAuthenticationMethods, sHostKeyAgent, sPermitUserRC,
+ 	sStreamLocalBindMask, sStreamLocalBindUnlink,
+ 	sAllowStreamLocalForwarding,
++#ifdef TCP_STEALTH
++	sTCPStealthSecret,
++#endif
+ 	sDeprecated, sUnsupported
+ } ServerOpCodes;
+ 
+@@ -451,6 +457,9 @@ static struct {
+ 	{ "streamlocalbindmask", sStreamLocalBindMask, SSHCFG_ALL },
+ 	{ "streamlocalbindunlink", sStreamLocalBindUnlink, SSHCFG_ALL },
+ 	{ "allowstreamlocalforwarding", sAllowStreamLocalForwarding, SSHCFG_ALL },
++#ifdef TCP_STEALTH
++	{ "tcpstealthsecret", sTCPStealthSecret },
++#endif
+ 	{ NULL, sBadOption, 0 }
+ };
+ 
+@@ -1615,7 +1624,23 @@ process_server_config_line(ServerOptions
+ 	case sStreamLocalBindUnlink:
+ 		intptr = &options->fwd_opts.streamlocal_bind_unlink;
+ 		goto parse_flag;
++#ifdef TCP_STEALTH
++	case sTCPStealthSecret:
++		charptr = &options->tcp_stealth_secret;
++
++		arg = strdelim(&cp);
++		if (!arg || *arg == '\0')
++			fatal("%s line %d: Missing argument.",
++				filename, linenum);
++
++		if (*activep && *charptr == NULL) {
++			*charptr = xmalloc(TCP_STEALTH_SECRET_SIZE + 1);
++			memset(*charptr, 0x00, TCP_STEALTH_SECRET_SIZE + 1);
++			strncpy(*charptr, arg, TCP_STEALTH_SECRET_SIZE);
++		}
+ 
++		break;
++#endif
+ 	case sDeprecated:
+ 		logit("%s line %d: Deprecated option %s",
+ 		    filename, linenum, arg);
+diff -Nurp openssh-6.7/servconf.h openssh-6.7-knock/servconf.h
+--- openssh-6.7/servconf.h	2014-07-15 17:54:14.000000000 +0200
++++ openssh-6.7-knock/servconf.h	2014-11-10 13:45:50.162522227 +0100
+@@ -183,6 +183,10 @@ typedef struct {
+ 
+ 	u_int	num_auth_methods;
+ 	char   *auth_methods[MAX_AUTH_METHODS];
++
++#ifdef TCP_STEALTH
++	char	*tcp_stealth_secret;
++#endif
+ }       ServerOptions;
+ 
+ /* Information about the incoming connection as used by Match */
+@@ -204,6 +208,12 @@ struct connection_info {
+  * NB. an option must appear in servconf.c:copy_set_server_options() or
+  * COPY_MATCH_STRING_OPTS here but never both.
+  */
++#ifdef TCP_STEALTH
++#define M_CP_STEALTHSCRT(X)	M_CP_STROPT(X);
++#else
++#define M_CP_STEALTHSCRT(X)	
++#endif
++
+ #define COPY_MATCH_STRING_OPTS() do { \
+ 		M_CP_STROPT(banner); \
+ 		M_CP_STROPT(trusted_user_ca_keys); \
+@@ -218,6 +228,7 @@ struct connection_info {
+ 		M_CP_STRARRAYOPT(deny_groups, num_deny_groups); \
+ 		M_CP_STRARRAYOPT(accept_env, num_accept_env); \
+ 		M_CP_STRARRAYOPT(auth_methods, num_auth_methods); \
++		M_CP_STEALTHSCRT(tcp_stealth_secret); \
+ 	} while (0)
+ 
+ struct connection_info *get_connection_info(int, int);
+diff -Nurp openssh-6.7/ssh.1 openssh-6.7-knock/ssh.1
+--- openssh-6.7/ssh.1	2014-07-25 00:57:10.000000000 +0200
++++ openssh-6.7-knock/ssh.1	2014-11-10 13:48:25.061186801 +0100
+@@ -63,6 +63,7 @@
+ .Op Fl S Ar ctl_path
+ .Op Fl W Ar host : Ns Ar port
+ .Op Fl w Ar local_tun Ns Op : Ns Ar remote_tun
++.Op Fl z Ar tcp_stealth_secret
+ .Oo Ar user Ns @ Oc Ns Ar hostname
+ .Op Ar command
+ .Ek
+@@ -473,6 +474,7 @@ For full details of the options listed b
+ .It StreamLocalBindUnlink
+ .It StrictHostKeyChecking
+ .It TCPKeepAlive
++.It TCPStealthSecret
+ .It Tunnel
+ .It TunnelDevice
+ .It UsePrivilegedPort
+@@ -668,6 +670,21 @@ Send log information using the
+ .Xr syslog 3
+ system module.
+ By default this information is sent to stderr.
++.It Fl z Ar tcp_stealth_secret
++Specifies the shared secret which is needed to connect to a stealth SSH TCP
++server. Any string specified will be truncated to or padded with zeroes to 64
++bytes. This option needs kernel support and is therefore only available if the
++required
++.Xr setsockopt 2
++call is available.
++.Pp
++See http://datatracker.ietf.org/doc/draft-kirsch-ietf-tcp-stealth/ for details.
++.Pp
++.Cm IMPORTANT:
++This option should only be used for the purpose of testing as other users could
++easily read out the secret from the command line arguments. The
++.Cm TCPStealthSecret
++configuration option is the preferred way of specifying the TCP Stealth secret.
+ .El
+ .Pp
+ .Nm
+diff -Nurp openssh-6.7/ssh.c openssh-6.7-knock/ssh.c
+--- openssh-6.7/ssh.c	2014-07-17 09:22:19.000000000 +0200
++++ openssh-6.7-knock/ssh.c	2014-11-10 13:48:25.061186801 +0100
+@@ -179,6 +179,14 @@ static int remote_forward_confirms_recei
+ extern int muxserver_sock;
+ extern u_int muxclient_command;
+ 
++#ifdef TCP_STEALTH
++#define OPT_STEALTH	"[-z tcp_stealth_secret] "
++#define GETOPT_STEALTH	"z:"
++#else
++#define OPT_STEALTH	""
++#define GETOPT_STEALTH	""
++#endif
++
+ /* Prints a help message to the user.  This function never returns. */
+ 
+ static void
+@@ -192,7 +200,7 @@ usage(void)
+ "           [-O ctl_cmd] [-o option] [-p port]\n"
+ "           [-Q cipher | cipher-auth | mac | kex | key]\n"
+ "           [-R [bind_address:]port:host:hostport] [-S ctl_path] [-W host:port]\n"
+-"           [-w local_tun[:remote_tun]] [user@]hostname [command]\n"
++"           [-w local_tun[:remote_tun]] " OPT_STEALTH "[user@]hostname [command]\n"
+ 	);
+ 	exit(255);
+ }
+@@ -478,7 +486,7 @@ main(int ac, char **av)
+ 
+  again:
+ 	while ((opt = getopt(ac, av, "1246ab:c:e:fgi:kl:m:no:p:qstvx"
+-	    "ACD:E:F:I:KL:MNO:PQ:R:S:TVw:W:XYy")) != -1) {
++	    "ACD:E:F:I:KL:MNO:PQ:R:S:TVw:W:XYy" GETOPT_STEALTH)) != -1) {
+ 		switch (opt) {
+ 		case '1':
+ 			options.protocol = SSH_PROTO_1;
+@@ -779,6 +787,14 @@ main(int ac, char **av)
+ 		case 'F':
+ 			config = optarg;
+ 			break;
++#ifdef TCP_STEALTH
++		case 'z':
++			options.tcp_stealth_secret =
++				xcalloc(TCP_STEALTH_SECRET_SIZE + 1, sizeof(u_int8_t));
++			strncpy(options.tcp_stealth_secret, optarg,
++				TCP_STEALTH_SECRET_SIZE);
++			break;
++#endif
+ 		default:
+ 			usage();
+ 		}
+diff -Nurp openssh-6.7/ssh_config.5 openssh-6.7-knock/ssh_config.5
+--- openssh-6.7/ssh_config.5	2014-07-15 17:54:14.000000000 +0200
++++ openssh-6.7-knock/ssh_config.5	2014-11-10 13:48:34.321106975 +0100
+@@ -1380,6 +1380,15 @@ This is important in scripts, and many u
+ .Pp
+ To disable TCP keepalive messages, the value should be set to
+ .Dq no .
++.It Cm TCPStealthSecret
++Specifies the shared secret which is needed to connect to a stealth SSH TCP
++Server. Any string specified will be truncated to or padded with zeroes to 64
++bytes. This option needs kernel support and is therefore only available if the
++required
++.Xr setsockopt 2
++call is available.
++.Pp
++See http://datatracker.ietf.org/doc/draft-kirsch-ietf-tcp-stealth/ for details.
+ .It Cm Tunnel
+ Request
+ .Xr tun 4
+diff -Nurp openssh-6.7/sshconnect.c openssh-6.7-knock/sshconnect.c
+--- openssh-6.7/sshconnect.c	2014-07-15 17:54:14.000000000 +0200
++++ openssh-6.7-knock/sshconnect.c	2014-11-10 13:48:34.321106975 +0100
+@@ -269,6 +269,18 @@ ssh_create_socket(int privileged, struct
+ 	}
+ 	fcntl(sock, F_SETFD, FD_CLOEXEC);
+ 
++#ifdef TCP_STEALTH
++	if (options.tcp_stealth_secret) {
++		if (setsockopt(sock, IPPROTO_TCP, TCP_STEALTH,
++			       options.tcp_stealth_secret,
++			       TCP_STEALTH_SECRET_SIZE) == -1) {
++			error("setsockopt TCP_STEALTH: %s", strerror(errno));
++			close(sock);
++			return -1;
++		}
++	}
++#endif
++
+ 	/* Bind the socket to an alternative local IP address */
+ 	if (options.bind_address == NULL && !privileged)
+ 		return sock;
+diff -Nurp openssh-6.7/sshd.8 openssh-6.7-knock/sshd.8
+--- openssh-6.7/sshd.8	2014-07-04 00:40:43.000000000 +0200
++++ openssh-6.7-knock/sshd.8	2014-11-10 13:48:42.693034803 +0100
+@@ -55,6 +55,7 @@
+ .Op Fl o Ar option
+ .Op Fl p Ar port
+ .Op Fl u Ar len
++.Op Fl z Ar tcp_stealth_secret
+ .Ek
+ .Sh DESCRIPTION
+ .Nm
+@@ -270,6 +271,24 @@ USER@HOST pattern in
+ .Cm AllowUsers
+ or
+ .Cm DenyUsers .
++.It Fl z Ar tcp_stealth_secret
++Turns this SSH server into a stealth SSH TCP server. This option specifies the
++shared secret which is needed by the clients in order to be able to connect to
++the port the SSH server is listening on.  Any string specified will be truncated
++or padded with zeroes to 64 bytes. This option needs kernel support and is
++therefore only available if the required
++.Xr setsockopt 2
++call is available.
++.Pp
++See http://datatracker.ietf.org/doc/draft-kirsch-ietf-tcp-stealth/ for details.
++
++.Cm IMPORTANT:
++This option should only be used for the purpose of
++testing as other users could easily read out the secret from the
++command line arguments. The
++.Cm TCPStealthSecret
++configuration option
++is the preferred way of specifying the TCP Stealth secret.
+ .El
+ .Sh AUTHENTICATION
+ The OpenSSH SSH daemon supports SSH protocols 1 and 2.
+diff -Nurp openssh-6.7/sshd.c openssh-6.7-knock/sshd.c
+--- openssh-6.7/sshd.c	2014-07-15 17:54:14.000000000 +0200
++++ openssh-6.7-knock/sshd.c	2014-11-10 13:48:42.693034803 +0100
+@@ -897,6 +897,14 @@ drop_connection(int startups)
+ 	return (r < p) ? 1 : 0;
+ }
+ 
++#ifdef TCP_STEALTH
++#define OPT_STEALTH	" [-z tcp_stealth_secret]"
++#define GETOPT_STEALTH	"z:"
++#else
++#define OPT_STEALTH	""
++#define GETOPT_STEALTH	""
++#endif
++
+ static void
+ usage(void)
+ {
+@@ -912,7 +920,7 @@ usage(void)
+ "usage: sshd [-46DdeiqTt] [-b bits] [-C connection_spec] [-c host_cert_file]\n"
+ "            [-E log_file] [-f config_file] [-g login_grace_time]\n"
+ "            [-h host_key_file] [-k key_gen_time] [-o option] [-p port]\n"
+-"            [-u len]\n"
++"            [-u len]" OPT_STEALTH "\n"
+ 	);
+ 	exit(1);
+ }
+@@ -1082,6 +1090,15 @@ server_listen(void)
+ 		if (setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR,
+ 		    &on, sizeof(on)) == -1)
+ 			error("setsockopt SO_REUSEADDR: %s", strerror(errno));
++#ifdef TCP_STEALTH
++		if (options.tcp_stealth_secret != NULL) {
++			if (setsockopt(listen_sock, IPPROTO_TCP, TCP_STEALTH,
++			    options.tcp_stealth_secret,
++			    TCP_STEALTH_SECRET_SIZE) == -1)
++				error("setsockopt TCP_STEALTH: %s",
++				      strerror(errno));
++		}
++#endif
+ 
+ 		debug("Bind to port %s on %s.", strport, ntop);
+ 
+@@ -1355,7 +1372,8 @@ main(int ac, char **av)
+ 	initialize_server_options(&options);
+ 
+ 	/* Parse command-line arguments. */
+-	while ((opt = getopt(ac, av, "f:p:b:k:h:g:u:o:C:dDeE:iqrtQRT46")) != -1) {
++	while ((opt = getopt(ac, av, "z:f:p:b:k:h:g:u:o:C:" \
++			     "dDeE:iqrtQRT46" GETOPT_STEALTH)) != -1) {
+ 		switch (opt) {
+ 		case '4':
+ 			options.address_family = AF_INET;
+@@ -1467,6 +1485,14 @@ main(int ac, char **av)
+ 				exit(1);
+ 			free(line);
+ 			break;
++#ifdef TCP_STEALTH
++		case 'z':
++			options.tcp_stealth_secret =
++				xcalloc(TCP_STEALTH_SECRET_SIZE + 1, sizeof(u_int8_t));
++			strncpy(options.tcp_stealth_secret, optarg,
++				TCP_STEALTH_SECRET_SIZE);
++			break;
++#endif
+ 		case '?':
+ 		default:
+ 			usage();
+diff -Nurp openssh-6.7/sshd_config.5 openssh-6.7-knock/sshd_config.5
+--- openssh-6.7/sshd_config.5	2014-07-28 17:40:08.000000000 +0200
++++ openssh-6.7-knock/sshd_config.5	2014-11-10 13:48:45.657009252 +0100
+@@ -1280,6 +1280,18 @@ This avoids infinitely hanging sessions.
+ .Pp
+ To disable TCP keepalive messages, the value should be set to
+ .Dq no .
++.It Cm TCPStealthSecret
++Turns this SSH server into a stealth SSH TCP server. This configuration option
++specifies the shared secret needed by the clients in order to be able to connect
++to the port the SSH server is listening on. This means that port scanners will
++receive a TCP RST and thus will not recognize this TCP port being open.  Any
++string specified will be truncated or padded with zeroes to 64 bytes. This
++option needs kernel support and is therefore only available if the required
++.Xr setsockopt 2
++call is available.
++.Pp
++See http://datatracker.ietf.org/doc/draft-kirsch-ietf-tcp-stealth/ for details.
++
+ .It Cm TrustedUserCAKeys
+ Specifies a file containing public keys of certificate authorities that are
+ trusted to sign user certificates for authentication.

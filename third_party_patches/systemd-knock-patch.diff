@@ -1,0 +1,103 @@
+diff --git a/configure.ac b/configure.ac
+index 05fc00d..f515619 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1076,6 +1076,18 @@ fi
+ AM_CONDITIONAL(ENABLE_TERMINAL, [test "x$have_terminal" = "xyes"])
+ 
+ # ------------------------------------------------------------------------------
++have_tcp_stealth=no
++AC_ARG_ENABLE(tcp_stealth, AS_HELP_STRING([--enable-tcp-stealth], [enable tcp stealth support]))
++if test "x$enable_tcp_stealth" = "xyes"; then
++        AC_DEFINE(ENABLE_TCP_STEALTH, 1, [Define if tcp stealth support is to be enabled])
++        have_tcp_stealth=yes
++        M4_DEFINES="$M4_DEFINES -DHAVE_TCP_STEALTH"
++        CC_CHECK_FLAGS_APPEND([with_stealth_cflags], [CFLAGS], [-DHAVE_TCP_STEALTH ])
++        AC_SUBST([OUR_CFLAGS], "$with_cflags $with_stealth_cflags")
++fi
++AM_CONDITIONAL(ENABLE_TCP_STEALTH, [test "$have_tcp_stealth" = "yes"])
++
++# ------------------------------------------------------------------------------
+ have_kdbus=no
+ AC_ARG_ENABLE(kdbus, AS_HELP_STRING([--enable-kdbus], [do connect to kdbus by default]))
+ if test "x$enable_kdbus" = "xyes"; then
+@@ -1389,6 +1401,7 @@ AC_MSG_RESULT([
+         SysV compatibility:      ${SYSTEM_SYSV_COMPAT}
+         compatibility libraries: ${have_compat_libs}
+         utmp/wtmp support:       ${have_utmp}
++        TCP Stealth:             ${have_tcp_stealth}
+ 
+         prefix:                  ${prefix}
+         rootprefix:              ${with_rootprefix}
+diff --git a/src/core/load-fragment-gperf.gperf.m4 b/src/core/load-fragment-gperf.gperf.m4
+index 1d2debe..b604702 100644
+--- a/src/core/load-fragment-gperf.gperf.m4
++++ b/src/core/load-fragment-gperf.gperf.m4
+@@ -280,6 +280,11 @@ Socket.MessageQueueMessageSize,  config_parse_long,                  0,
+ Socket.RemoveOnStop,             config_parse_bool,                  0,                             offsetof(Socket, remove_on_stop)
+ Socket.Symlinks,                 config_parse_unit_path_strv_printf, 0,                             offsetof(Socket, symlinks)
+ Socket.Service,                  config_parse_socket_service,        0,                             0
++m4_ifdef(`HAVE_TCP_STEALTH',
++`Socket.TCPStealthSecret,        config_parse_string,                0,                             offsetof(Socket, tcp_stealth_secret),
++Socket.TCPStealthIntegrityLen,   config_parse_unsigned,              0,                             offsetof(Socket, tcp_stealth_integrity_len)',
++`Socket.TCPStealthSecret,        config_parse_warn_compat,           0,                             0,
++Socket.TCPStealthIntegrityLen,   config_parse_warn_compat,           0,                             0')
+ m4_ifdef(`HAVE_SMACK',
+ `Socket.SmackLabel,              config_parse_string,                0,                             offsetof(Socket, smack)
+ Socket.SmackLabelIPIn,           config_parse_string,                0,                             offsetof(Socket, smack_ip_in)
+diff --git a/src/core/socket.c b/src/core/socket.c
+index 39652ef..7a45abe 100644
+--- a/src/core/socket.c
++++ b/src/core/socket.c
+@@ -933,6 +933,36 @@ static void socket_apply_socket_options(Socket *s, int fd) {
+                 if (r < 0)
+                         log_error_unit(UNIT(s)->id, "mac_smack_apply_ip_out_fd: %s", strerror(-r));
+         }
++#ifdef HAVE_TCP_STEALTH
++        if (s->tcp_stealth_secret) {
++#ifndef TCP_STEALTH
++                errno = -EOPNOTSUPP;
++#else
++                char secret[TCP_STEALTH_SECRET_SIZE + 1];
++                memset(secret, 0x00, TCP_STEALTH_SECRET_SIZE + 1);
++                strncpy(secret, s->tcp_stealth_secret, TCP_STEALTH_SECRET_SIZE);
++                r = setsockopt(fd, IPPROTO_TCP, TCP_STEALTH, secret,
++                               TCP_STEALTH_SECRET_SIZE);
++                /* FIXME: We might want to abort if this failed */
++                if (r < 0)
++#endif
++                        log_error_unit(UNIT(s)->id, "TCP_STEALTH failed: %m");
++        }
++
++        if (s->tcp_stealth_integrity_len) {
++#ifndef TCP_STEALTH_INTEGRITY_LEN
++                errno = -EOPNOTSUPP;
++#else
++                size_t value = s->tcp_stealth_integrity_len;
++                r = setsockopt(fd, IPPROTO_TCP, TCP_STEALTH_INTEGRITY_LEN,
++                               &value, sizeof(value));
++                /* FIXME: We might want to abort if this failed */
++                if (r < 0)
++#endif
++                        log_error_unit(UNIT(s)->id, "TCP_STEALTH_INTEGRITY_LEN failed: %m");
++        }
++#endif
++
+ }
+ 
+ static void socket_apply_fifo_options(Socket *s, int fd) {
+diff --git a/src/core/socket.h b/src/core/socket.h
+index a2e0899..8309635 100644
+--- a/src/core/socket.h
++++ b/src/core/socket.h
+@@ -144,6 +144,10 @@ struct Socket {
+         bool broadcast;
+         bool pass_cred;
+         bool pass_sec;
++#ifdef HAVE_TCP_STEALTH
++        char *tcp_stealth_secret;
++        size_t tcp_stealth_integrity_len;
++#endif
+ 
+         /* Only for INET6 sockets: issue IPV6_V6ONLY sockopt */
+         SocketAddressBindIPv6Only bind_ipv6_only;
